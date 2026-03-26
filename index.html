@@ -390,6 +390,18 @@
     rawMouseY = (e.clientY - rect.top)  / rect.height;
   });
 
+  function handleTouch(e) {
+    if (!running) return;
+    e.preventDefault();
+    const touch = e.touches[0];
+    if (!touch) return;
+    const rect = canvas.getBoundingClientRect();
+    rawMouseX = (touch.clientX - rect.left) / rect.width;
+    rawMouseY = (touch.clientY - rect.top)  / rect.height;
+  }
+  canvas.addEventListener('touchstart', handleTouch, { passive: false });
+  canvas.addEventListener('touchmove',  handleTouch, { passive: false });
+
   /* ------------------------------------------------------------------ */
   /*  Render loop                                                         */
   /* ------------------------------------------------------------------ */
