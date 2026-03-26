@@ -184,8 +184,9 @@
   const shaderCode = /* wgsl */ `
     // ---- Uniforms ----
     struct Uniforms {
-      mouse    : vec2<f32>,  // smoothed mouse in [0,1] plane (NDC after transform)
-      reserved : vec2<f32>,
+      mouse : vec2<f32>,
+      time  : f32,
+      pad   : f32,
     };
 
     @group(0) @binding(0) var<uniform>       uni     : Uniforms;
@@ -215,6 +216,12 @@
       // uv: (0,0) = top-left, (1,1) = bottom-right
       out.uv  = vec2(p.x * 0.5 + 0.5, 0.5 - p.y * 0.5);
       return out;
+    }
+
+    // ---- Helpers ----
+    fn hash2(p: vec2<f32>) -> vec2<f32> {
+      let q = vec2<f32>(dot(p, vec2<f32>(127.1, 311.7)), dot(p, vec2<f32>(269.5, 183.3)));
+      return fract(sin(q) * 43758.5453) * 6.2832; // random phase 0..2π per quad
     }
 
     // ---- Fragment ----
@@ -259,8 +266,8 @@
       if (d3 < minDist) { minDist = d3; nearestCorner = c3; }
 
       // t = 0 when mouse is ON the nearest corner, 1 when far away
-      let influenceRadius = 0.5;
-      let t = clamp(minDist / influenceRadius, 0.0, 1.0);
+      // Wider radius (0.65) softens the hover→idle boundary for smoother transition
+      let t  = clamp(minDist / 0.65, 0.0, 1.0);
       let ts = smoothstep(0.0, 1.0, t);
 
       // Offset: direction from mouse toward nearest corner (= away from mouse)
@@ -277,7 +284,15 @@
       // Drastic spread: near vertex = very zoomed in, far = pixel-perfect slice
       let zoomFactor = mix(4.0, 1.0, ts);
       let sliceCenter = vec2((col + 0.5) / GRID_F, (row + 0.5) / GRID_F);
-      let imageUV = clamp(sliceCenter + (uv - sliceCenter) / zoomFactor + offset, vec2(0.0), vec2(1.0));
+
+      // Low-frequency wiggle: independent phase per quad, applies in both states
+      let phase = hash2(vec2(col, row));
+      let wiggle = vec2<f32>(
+        sin(uni.time * 1.1 + phase.x) * 0.013,
+        cos(uni.time * 0.8 + phase.y) * 0.013
+      );
+
+      let imageUV = clamp(sliceCenter + (uv - sliceCenter) / zoomFactor + offset + wiggle, vec2(0.0), vec2(1.0));
 
       // Sample unconditionally (textureSample requires uniform control flow)
       let color = textureSample(tex, samp, imageUV);
@@ -410,7 +425,7 @@
     smoothMouseY += (rawMouseY - smoothMouseY) * MOUSE_LERP;
 
     // Write uniforms
-    const data = new Float32Array([smoothMouseX, smoothMouseY, 0, 0]);
+    const data = new Float32Array([smoothMouseX, smoothMouseY, performance.now() / 1000.0, 0]);
     device.queue.writeBuffer(uniformBuffer, 0, data);
 
     const commandEncoder = device.createCommandEncoder();
