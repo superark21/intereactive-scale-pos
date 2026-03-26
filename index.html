@@ -1,0 +1,475 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>WebGPU Image Grid</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    html, body {
+      width: 100%; height: 100%;
+      background: #0a0a0f;
+      color: #e0e0e0;
+      font-family: system-ui, -apple-system, sans-serif;
+      overflow: hidden;
+    }
+
+    #upload-screen {
+      position: fixed;
+      inset: 0;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 20px;
+      z-index: 10;
+      transition: opacity 0.4s ease;
+    }
+
+    #upload-screen.hidden {
+      opacity: 0;
+      pointer-events: none;
+    }
+
+    #upload-screen h1 {
+      font-size: 1.4rem;
+      font-weight: 400;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: #888;
+    }
+
+    #upload-label {
+      display: inline-flex;
+      align-items: center;
+      gap: 10px;
+      padding: 14px 32px;
+      border: 1px solid #333;
+      border-radius: 4px;
+      cursor: pointer;
+      font-size: 0.95rem;
+      letter-spacing: 0.04em;
+      color: #ccc;
+      background: #111;
+      transition: border-color 0.2s, color 0.2s, background 0.2s;
+    }
+
+    #upload-label:hover {
+      border-color: #666;
+      color: #fff;
+      background: #1a1a1a;
+    }
+
+    #file-input {
+      display: none;
+    }
+
+    #error-msg {
+      position: fixed;
+      inset: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 1rem;
+      color: #e06060;
+      background: #0a0a0f;
+      z-index: 20;
+      text-align: center;
+      padding: 40px;
+      line-height: 1.7;
+      display: none;
+    }
+
+    #canvas-container {
+      position: fixed;
+      inset: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    #gpu-canvas {
+      display: block;
+      /* size set by JS */
+    }
+  </style>
+</head>
+<body>
+
+  <div id="error-msg"></div>
+
+  <div id="upload-screen">
+    <h1>WebGPU Image Grid</h1>
+    <label id="upload-label" for="file-input">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+        <polyline points="17 8 12 3 7 8"/>
+        <line x1="12" y1="3" x2="12" y2="15"/>
+      </svg>
+      Choose an image
+    </label>
+    <input type="file" id="file-input" accept="image/*" />
+    <p style="font-size:0.75rem;color:#444;margin-top:4px;">Move the mouse after upload</p>
+  </div>
+
+  <div id="canvas-container">
+    <canvas id="gpu-canvas"></canvas>
+  </div>
+
+<script>
+(async () => {
+
+  /* ------------------------------------------------------------------ */
+  /*  WebGPU availability check                                          */
+  /* ------------------------------------------------------------------ */
+  const errorEl = document.getElementById('error-msg');
+
+  function fatalError(msg) {
+    errorEl.style.display = 'flex';
+    errorEl.innerHTML = msg;
+  }
+
+  if (!navigator.gpu) {
+    fatalError(
+      'WebGPU is not supported in this browser.<br/>' +
+      'Try Chrome 113+ or Edge 113+ on a supported platform.'
+    );
+    return;
+  }
+
+  const adapter = await navigator.gpu.requestAdapter();
+  if (!adapter) {
+    fatalError('No WebGPU adapter found. Your GPU may not be supported.');
+    return;
+  }
+
+  const device = await adapter.requestDevice();
+
+  /* ------------------------------------------------------------------ */
+  /*  DOM refs                                                            */
+  /* ------------------------------------------------------------------ */
+  const canvas       = document.getElementById('gpu-canvas');
+  const uploadScreen = document.getElementById('upload-screen');
+  const fileInput    = document.getElementById('file-input');
+
+  const ctx = canvas.getContext('webgpu');
+
+  const preferredFormat = navigator.gpu.getPreferredCanvasFormat();
+
+  function configureContext() {
+    ctx.configure({ device, format: preferredFormat, alphaMode: 'opaque' });
+  }
+  configureContext();
+
+  /* ------------------------------------------------------------------ */
+  /*  State                                                               */
+  /* ------------------------------------------------------------------ */
+  let imageAspect    = 1;       // width / height of uploaded image
+  let running        = false;
+
+  // raw mouse in canvas-pixel space
+  let rawMouseX = 0.5;
+  let rawMouseY = 0.5;
+
+  // smoothed mouse in [0,1] plane space (passed to shader)
+  let smoothMouseX = 0.5;
+  let smoothMouseY = 0.5;
+
+  /* ------------------------------------------------------------------ */
+  /*  WGSL shaders                                                        */
+  /* ------------------------------------------------------------------ */
+  const GRID = 12;   // 12x12 quads
+
+  const shaderCode = /* wgsl */ `
+    // ---- Uniforms ----
+    struct Uniforms {
+      mouse    : vec2<f32>,  // smoothed mouse in [0,1] plane (NDC after transform)
+      reserved : vec2<f32>,
+    };
+
+    @group(0) @binding(0) var<uniform>       uni     : Uniforms;
+    @group(0) @binding(1) var               samp    : sampler;
+    @group(0) @binding(2) var               tex     : texture_2d<f32>;
+
+    // ---- Vertex ----
+    struct VertOut {
+      @builtin(position) pos   : vec4<f32>,
+      @location(0)       uv    : vec2<f32>,  // plane UV 0..1
+    };
+
+    @vertex
+    fn vs_main(@builtin(vertex_index) vi : u32) -> VertOut {
+      // Full-screen quad (two triangles)
+      var positions = array<vec2<f32>, 6>(
+        vec2(-1.0, -1.0),
+        vec2( 1.0, -1.0),
+        vec2(-1.0,  1.0),
+        vec2(-1.0,  1.0),
+        vec2( 1.0, -1.0),
+        vec2( 1.0,  1.0),
+      );
+      let p = positions[vi];
+      var out : VertOut;
+      out.pos = vec4(p, 0.0, 1.0);
+      // uv: (0,0) = top-left, (1,1) = bottom-right
+      out.uv  = vec2(p.x * 0.5 + 0.5, 0.5 - p.y * 0.5);
+      return out;
+    }
+
+    // ---- Fragment ----
+    @fragment
+    fn fs_main(in : VertOut) -> @location(0) vec4<f32> {
+      let GRID_F = ${GRID}.0;
+      let uv = in.uv;  // 0..1 over the whole plane
+
+      // Which quad are we in?
+      let col = floor(uv.x * GRID_F);
+      let row = floor(uv.y * GRID_F);
+
+      // Normalised position inside this quad [0..1]
+      let quadUV = vec2(
+        uv.x * GRID_F - col,
+        uv.y * GRID_F - row,
+      );
+
+      // The four corners of this quad in plane-UV space
+      let qx0 = col         / GRID_F;
+      let qx1 = (col + 1.0) / GRID_F;
+      let qy0 = row         / GRID_F;
+      let qy1 = (row + 1.0) / GRID_F;
+
+      let mouse = uni.mouse;
+
+      // Manually compare all 4 corners (avoids dynamic indexing of let-bound array)
+      let c0 = vec2(qx0, qy0);
+      let c1 = vec2(qx1, qy0);
+      let c2 = vec2(qx0, qy1);
+      let c3 = vec2(qx1, qy1);
+
+      let d0 = distance(mouse, c0);
+      let d1 = distance(mouse, c1);
+      let d2 = distance(mouse, c2);
+      let d3 = distance(mouse, c3);
+
+      var minDist = d0;
+      var nearestCorner = c0;
+      if (d1 < minDist) { minDist = d1; nearestCorner = c1; }
+      if (d2 < minDist) { minDist = d2; nearestCorner = c2; }
+      if (d3 < minDist) { minDist = d3; nearestCorner = c3; }
+
+      // t = 0 when mouse is ON the nearest corner, 1 when far away
+      let influenceRadius = 0.5;
+      let t = clamp(minDist / influenceRadius, 0.0, 1.0);
+      let ts = smoothstep(0.0, 1.0, t);
+
+      // Scale: near vertex = 1.5 (150% zoom, image cropped into quad)
+      //        far from vertex = 1.0 (image fits quad exactly, no black border)
+      let scale = mix(1.5, 1.0, ts);
+
+      // Offset: direction from mouse toward nearest corner (= away from mouse)
+      // near = no offset (zoomed, no room needed), far = small shift visible at quad edge
+      let offsetDir = select(
+        normalize(nearestCorner - mouse),
+        vec2(0.0),
+        minDist < 0.001
+      );
+      let offsetMag = 0.06 * ts;   // 0 when near, 6% of image when far
+      let offset = offsetDir * offsetMag;
+
+      // Remap quadUV: zoom around quad center, then shift the sample window
+      let centeredUV = quadUV - 0.5;       // -0.5 .. 0.5
+      let scaledUV   = centeredUV / scale; // at scale=1.5: -0.33..0.33 (zoomed in)
+      let imageUV    = scaledUV + 0.5 + offset;
+
+      // Sample unconditionally (textureSample requires uniform control flow)
+      let color = textureSample(tex, samp, imageUV);
+
+      // Black border outside [0,1] — use select instead of early return
+      let oob = imageUV.x < 0.0 || imageUV.x > 1.0 || imageUV.y < 0.0 || imageUV.y > 1.0;
+      return select(vec4(color.rgb, 1.0), vec4(0.0, 0.0, 0.0, 1.0), oob);
+    }
+  `;
+
+  /* ------------------------------------------------------------------ */
+  /*  Pipeline, buffers, bind group (created once image is loaded)       */
+  /* ------------------------------------------------------------------ */
+  let pipeline       = null;
+  let uniformBuffer  = null;
+  let bindGroup      = null;
+  let texture        = null;
+
+  device.addEventListener('uncapturederror', (e) => {
+    console.error('WebGPU uncaptured error:', e.error);
+    fatalError('WebGPU error: ' + e.error.message);
+  });
+
+  async function createPipeline(gpuTexture) {
+    texture = gpuTexture;
+
+    const shaderModule = device.createShaderModule({ code: shaderCode });
+
+    // Check for shader compilation errors
+    const info = await shaderModule.getCompilationInfo();
+    for (const msg of info.messages) {
+      if (msg.type === 'error') {
+        fatalError('Shader error (line ' + msg.lineNum + '): ' + msg.message);
+        console.error('Shader compile error:', msg);
+        return;
+      }
+    }
+
+    pipeline = device.createRenderPipeline({
+      layout: 'auto',
+      vertex:   { module: shaderModule, entryPoint: 'vs_main' },
+      fragment: {
+        module: shaderModule,
+        entryPoint: 'fs_main',
+        targets: [{ format: preferredFormat }],
+      },
+      primitive: { topology: 'triangle-list' },
+    });
+
+    // Uniform buffer: mouse (vec2) + padding (vec2) = 16 bytes
+    uniformBuffer = device.createBuffer({
+      size: 16,
+      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+    });
+
+    const sampler = device.createSampler({
+      magFilter: 'linear',
+      minFilter: 'linear',
+      addressModeU: 'clamp-to-edge',
+      addressModeV: 'clamp-to-edge',
+    });
+
+    bindGroup = device.createBindGroup({
+      layout: pipeline.getBindGroupLayout(0),
+      entries: [
+        { binding: 0, resource: { buffer: uniformBuffer } },
+        { binding: 1, resource: sampler },
+        { binding: 2, resource: texture.createView() },
+      ],
+    });
+  }
+
+  /* ------------------------------------------------------------------ */
+  /*  Canvas sizing                                                       */
+  /* ------------------------------------------------------------------ */
+  function resizeCanvas() {
+    if (!running) return;
+    const padding  = 40;
+    const maxW     = window.innerWidth  - padding * 2;
+    const maxH     = window.innerHeight - padding * 2;
+
+    let w, h;
+    if (maxW / imageAspect <= maxH) {
+      w = maxW;
+      h = Math.round(maxW / imageAspect);
+    } else {
+      h = maxH;
+      w = Math.round(maxH * imageAspect);
+    }
+
+    canvas.width  = w;
+    canvas.height = h;
+    canvas.style.width  = w + 'px';
+    canvas.style.height = h + 'px';
+    configureContext();
+  }
+
+  window.addEventListener('resize', resizeCanvas);
+
+  /* ------------------------------------------------------------------ */
+  /*  Mouse tracking                                                      */
+  /* ------------------------------------------------------------------ */
+  window.addEventListener('mousemove', (e) => {
+    if (!running) return;
+    const rect = canvas.getBoundingClientRect();
+    rawMouseX = (e.clientX - rect.left) / rect.width;
+    rawMouseY = (e.clientY - rect.top)  / rect.height;
+  });
+
+  /* ------------------------------------------------------------------ */
+  /*  Render loop                                                         */
+  /* ------------------------------------------------------------------ */
+  const MOUSE_LERP = 0.08;
+
+  function frame() {
+    if (!running) return;
+    requestAnimationFrame(frame);
+
+    // Smooth mouse
+    smoothMouseX += (rawMouseX - smoothMouseX) * MOUSE_LERP;
+    smoothMouseY += (rawMouseY - smoothMouseY) * MOUSE_LERP;
+
+    // Write uniforms
+    const data = new Float32Array([smoothMouseX, smoothMouseY, 0, 0]);
+    device.queue.writeBuffer(uniformBuffer, 0, data);
+
+    const commandEncoder = device.createCommandEncoder();
+    const renderPass     = commandEncoder.beginRenderPass({
+      colorAttachments: [{
+        view:       ctx.getCurrentTexture().createView(),
+        clearValue: { r: 0.04, g: 0.04, b: 0.06, a: 1 },
+        loadOp:     'clear',
+        storeOp:    'store',
+      }],
+    });
+
+    renderPass.setPipeline(pipeline);
+    renderPass.setBindGroup(0, bindGroup);
+    renderPass.draw(6, 1, 0, 0);  // 2 triangles = full-screen quad
+    renderPass.end();
+
+    device.queue.submit([commandEncoder.finish()]);
+  }
+
+  /* ------------------------------------------------------------------ */
+  /*  Image upload                                                        */
+  /* ------------------------------------------------------------------ */
+  fileInput.addEventListener('change', async (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+
+    const bitmap = await createImageBitmap(file);
+    imageAspect = bitmap.width / bitmap.height;
+
+    // Create GPU texture from bitmap
+    const gpuTex = device.createTexture({
+      size:   [bitmap.width, bitmap.height, 1],
+      format: 'rgba8unorm',
+      usage:  GPUTextureUsage.TEXTURE_BINDING |
+              GPUTextureUsage.COPY_DST         |
+              GPUTextureUsage.RENDER_ATTACHMENT,
+    });
+
+    device.queue.copyExternalImageToTexture(
+      { source: bitmap },
+      { texture: gpuTex },
+      [bitmap.width, bitmap.height],
+    );
+    bitmap.close();
+
+    await createPipeline(gpuTex);
+    if (!pipeline) return; // shader error
+
+    running = true;
+    resizeCanvas();
+
+    // Hide upload screen
+    uploadScreen.classList.add('hidden');
+
+    // Center mouse start to avoid jarring first frame
+    rawMouseX = 0.5;
+    rawMouseY = 0.5;
+    smoothMouseX = 0.5;
+    smoothMouseY = 0.5;
+
+    frame();
+  });
+
+})();
+</script>
+</body>
+</html>
