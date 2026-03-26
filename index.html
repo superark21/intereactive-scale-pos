@@ -393,7 +393,7 @@
   /* ------------------------------------------------------------------ */
   /*  Mouse tracking                                                      */
   /* ------------------------------------------------------------------ */
-  window.addEventListener('mousemove', (e) => {
+  canvas.addEventListener('mousemove', (e) => {
     if (!running) return;
     const rect = canvas.getBoundingClientRect();
     rawMouseX = (e.clientX - rect.left) / rect.width;
@@ -413,7 +413,7 @@
   canvas.addEventListener('touchmove',  handleTouch, { passive: false });
 
   // Move effective mouse off-plane so all quads ease back to idle
-  document.documentElement.addEventListener('mouseleave', () => {
+  canvas.addEventListener('mouseleave', () => {
     rawMouseX = -2; rawMouseY = -2;
   });
   canvas.addEventListener('touchend', () => {
