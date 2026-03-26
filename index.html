@@ -282,7 +282,7 @@
       // Idle state: each quad samples only its own slice → reconstructs the full image
       // Active state: zooms into the slice (4x near mouse, 1x at idle)
       // Drastic spread: near vertex = very zoomed in, far = pixel-perfect slice
-      let zoomFactor = mix(4.0, 1.0, ts);
+      let zoomFactor = mix(1.0, 4.0, ts);
       let sliceCenter = vec2((col + 0.5) / GRID_F, (row + 0.5) / GRID_F);
 
       // Low-frequency wiggle: independent phase per quad, applies in both states
