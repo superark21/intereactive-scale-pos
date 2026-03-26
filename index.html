@@ -283,7 +283,7 @@
       // Idle state: each quad samples only its own slice → reconstructs the full image
       // Active state: zooms into the slice (4x near mouse, 1x at idle)
       // Drastic spread: near vertex = very zoomed in, far = pixel-perfect slice
-      let zoomFactor = mix(1.0, 4.0, ts);
+      let zoomFactor = mix(0.5, 4.0, ts);
       let sliceCenter = vec2((col + 0.5) / GRID_F, (row + 0.5) / GRID_F);
 
       // Low-frequency wiggle: independent phase per quad, applies in both states
@@ -411,6 +411,14 @@
   }
   canvas.addEventListener('touchstart', handleTouch, { passive: false });
   canvas.addEventListener('touchmove',  handleTouch, { passive: false });
+
+  // Move effective mouse off-plane so all quads ease back to idle
+  document.documentElement.addEventListener('mouseleave', () => {
+    rawMouseX = -2; rawMouseY = -2;
+  });
+  canvas.addEventListener('touchend', () => {
+    rawMouseX = -2; rawMouseY = -2;
+  }, { passive: true });
 
   /* ------------------------------------------------------------------ */
   /*  Render loop                                                         */
