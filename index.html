@@ -166,7 +166,8 @@
   /*  State                                                               */
   /* ------------------------------------------------------------------ */
   let imageAspect    = 1;       // width / height of uploaded image
-  let running        = false;
+  let running          = false;
+  let needsReconfigure = false;
 
   // raw mouse in canvas-pixel space
   let rawMouseX = 0.5;
@@ -384,7 +385,7 @@
     canvas.height = h;
     canvas.style.width  = w + 'px';
     canvas.style.height = h + 'px';
-    configureContext();
+    needsReconfigure = true;
   }
 
   window.addEventListener('resize', resizeCanvas);
@@ -419,6 +420,11 @@
   function frame() {
     if (!running) return;
     requestAnimationFrame(frame);
+
+    if (needsReconfigure) {
+      configureContext();
+      needsReconfigure = false;
+    }
 
     // Smooth mouse
     smoothMouseX += (rawMouseX - smoothMouseX) * MOUSE_LERP;
