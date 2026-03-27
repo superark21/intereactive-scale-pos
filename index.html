@@ -314,7 +314,7 @@
 
       // t = 0 when mouse is ON the nearest corner, 1 when far away
       // Wider radius (0.65) softens the hover→idle boundary for smoother transition
-      let t  = clamp(minDist / 0.65, 0.0, 1.0);
+      let t  = clamp(minDist / 0.455, 0.0, 1.0);
       let ts = smoothstep(0.0, 1.0, t);
 
       // Offset: sample toward mouse → image visually drifts away from cursor
@@ -337,9 +337,11 @@
 
       // Low-frequency wiggle: independent phase per quad, applies in both states
       let phase = hash2(vec2(col, row));
+      // Wiggle: zero only on the mouse's quad, full within ~2 quad widths
+      let wiggleT = smoothstep(0.0, 2.0 / GRID_X, minDist);
       let wiggle = vec2<f32>(
-        sin(uni.time * 0.9 + phase.x) * 0.022 * ts,
-        cos(uni.time * 0.7 + phase.y) * 0.022 * ts
+        sin(uni.time * 0.9 + phase.x) * 0.066 * wiggleT,
+        cos(uni.time * 0.7 + phase.y) * 0.066 * wiggleT
       );
 
       let imageUV = clamp(sliceCenter + (uv - sliceCenter) / zoomFactor + offset + wiggle, vec2(0.0), vec2(1.0));
