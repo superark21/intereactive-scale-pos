@@ -339,10 +339,17 @@
       let phase = hash2(vec2(col, row));
       // Wiggle: zero only on the mouse's quad, full within ~2 quad widths
       let wiggleT = smoothstep(0.0, 2.0 / GRID_X, minDist);
-      let wiggle = vec2<f32>(
+      // Global wiggle: same for all quads → shifts entire image uniformly, preserves reconstruction
+      let globalWiggle = vec2<f32>(
+        sin(uni.time * 0.9) * 0.008,
+        cos(uni.time * 0.7) * 0.008
+      );
+      // Per-quad wiggle: independent phase per quad, only during hover
+      let perQuadWiggle = vec2<f32>(
         sin(uni.time * 0.9 + phase.x) * 0.025 * wiggleT * uni.hoverActive,
         cos(uni.time * 0.7 + phase.y) * 0.025 * wiggleT * uni.hoverActive
       );
+      let wiggle = globalWiggle + perQuadWiggle;
 
       let imageUV = clamp(sliceCenter + (uv - sliceCenter) / zoomFactor + offset + wiggle, vec2(0.0), vec2(1.0));
 
