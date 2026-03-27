@@ -340,8 +340,8 @@
       // Wiggle: zero only on the mouse's quad, full within ~2 quad widths
       let wiggleT = smoothstep(0.0, 2.0 / GRID_X, minDist);
       let wiggle = vec2<f32>(
-        sin(uni.time * 0.9 + phase.x) * 0.066 * wiggleT,
-        cos(uni.time * 0.7 + phase.y) * 0.066 * wiggleT
+        sin(uni.time * 0.9 + phase.x) * 0.040 * wiggleT,
+        cos(uni.time * 0.7 + phase.y) * 0.040 * wiggleT
       );
 
       let imageUV = clamp(sliceCenter + (uv - sliceCenter) / zoomFactor + offset + wiggle, vec2(0.0), vec2(1.0));
