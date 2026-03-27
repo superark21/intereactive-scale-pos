@@ -341,8 +341,8 @@
       let wiggleT = smoothstep(0.0, 2.0 / GRID_X, minDist);
       // Global wiggle: same for all quads → shifts entire image uniformly, preserves reconstruction
       let globalWiggle = vec2<f32>(
-        sin(uni.time * 0.9) * 0.008,
-        cos(uni.time * 0.7) * 0.008
+        sin(uni.time * 0.9) * 0.022,
+        cos(uni.time * 0.7) * 0.022
       );
       // Per-quad wiggle: independent phase per quad, only during hover
       let perQuadWiggle = vec2<f32>(
