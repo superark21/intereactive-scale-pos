@@ -93,6 +93,33 @@
       display: block;
       /* size set by JS */
     }
+
+    #grid-toggle {
+      position: fixed;
+      bottom: 24px;
+      left: 50%;
+      transform: translateX(-50%);
+      display: none;
+      gap: 0;
+      z-index: 5;
+      border: 1px solid #333;
+      border-radius: 4px;
+      overflow: hidden;
+    }
+    #grid-toggle.visible { display: flex; }
+    .grid-btn {
+      padding: 8px 20px;
+      background: #111;
+      color: #555;
+      font-size: 0.75rem;
+      letter-spacing: 0.05em;
+      cursor: pointer;
+      border: none;
+      transition: background 0.2s, color 0.2s;
+    }
+    .grid-btn + .grid-btn { border-left: 1px solid #333; }
+    .grid-btn.active { background: #1e1e1e; color: #ddd; }
+    .grid-btn:hover:not(.active) { color: #999; }
   </style>
 </head>
 <body>
@@ -115,6 +142,11 @@
 
   <div id="canvas-container">
     <canvas id="gpu-canvas"></canvas>
+  </div>
+
+  <div id="grid-toggle">
+    <button class="grid-btn active" data-mode="proportional">Proportional</button>
+    <button class="grid-btn"        data-mode="square">Square</button>
   </div>
 
 <script>
@@ -165,10 +197,24 @@
   /* ------------------------------------------------------------------ */
   /*  State                                                               */
   /* ------------------------------------------------------------------ */
-  let imageAspect    = 1;       // width / height of uploaded image
+  let imageAspect      = 1;
   let running          = false;
   let needsReconfigure = false;
   let hoverActive      = 0.0;
+  let gridMode         = 'proportional';
+  let gridX            = 12;
+  let gridY            = 12;
+  let currentGpuTex    = null;
+
+  function computeGrid(mode, aspect) {
+    if (mode === 'square') {
+      const total = 144;
+      const cx = Math.max(1, Math.round(Math.sqrt(total * aspect)));
+      const cy = Math.max(1, Math.round(Math.sqrt(total / aspect)));
+      return { gx: cx, gy: cy };
+    }
+    return { gx: 12, gy: 12 };
+  }
 
   // raw mouse in canvas-pixel space
   let rawMouseX = 0.5;
@@ -181,9 +227,7 @@
   /* ------------------------------------------------------------------ */
   /*  WGSL shaders                                                        */
   /* ------------------------------------------------------------------ */
-  const GRID = 12;   // 12x12 quads
-
-  const shaderCode = /* wgsl */ `
+  function buildShaderCode(gx, gy) { return /* wgsl */ `
     // ---- Uniforms ----
     struct Uniforms {
       mouse       : vec2<f32>,
@@ -229,24 +273,25 @@
     // ---- Fragment ----
     @fragment
     fn fs_main(in : VertOut) -> @location(0) vec4<f32> {
-      let GRID_F = ${GRID}.0;
-      let uv = in.uv;  // 0..1 over the whole plane
+      let GRID_X = ${gx}.0;
+      let GRID_Y = ${gy}.0;
+      let uv = in.uv;
 
       // Which quad are we in?
-      let col = floor(uv.x * GRID_F);
-      let row = floor(uv.y * GRID_F);
+      let col = floor(uv.x * GRID_X);
+      let row = floor(uv.y * GRID_Y);
 
       // Normalised position inside this quad [0..1]
       let quadUV = vec2(
-        uv.x * GRID_F - col,
-        uv.y * GRID_F - row,
+        uv.x * GRID_X - col,
+        uv.y * GRID_Y - row,
       );
 
       // The four corners of this quad in plane-UV space
-      let qx0 = col         / GRID_F;
-      let qx1 = (col + 1.0) / GRID_F;
-      let qy0 = row         / GRID_F;
-      let qy1 = (row + 1.0) / GRID_F;
+      let qx0 = col         / GRID_X;
+      let qx1 = (col + 1.0) / GRID_X;
+      let qy0 = row         / GRID_Y;
+      let qy1 = (row + 1.0) / GRID_Y;
 
       let mouse = uni.mouse;
 
@@ -288,7 +333,7 @@
       // Hover: near cursor=0.5x zoom out, far=4.0x zoom in (drastic spread)
       let hoverZoom  = mix(0.5, 2.8, ts);
       let zoomFactor = mix(1.0, hoverZoom, uni.hoverActive);
-      let sliceCenter = vec2((col + 0.5) / GRID_F, (row + 0.5) / GRID_F);
+      let sliceCenter = vec2((col + 0.5) / GRID_X, (row + 0.5) / GRID_Y);
 
       // Low-frequency wiggle: independent phase per quad, applies in both states
       let phase = hash2(vec2(col, row));
@@ -303,7 +348,7 @@
       let color = textureSample(tex, samp, imageUV);
       return vec4(color.rgb, 1.0);
     }
-  `;
+  `; }
 
   /* ------------------------------------------------------------------ */
   /*  Pipeline, buffers, bind group (created once image is loaded)       */
@@ -321,7 +366,7 @@
   async function createPipeline(gpuTexture) {
     texture = gpuTexture;
 
-    const shaderModule = device.createShaderModule({ code: shaderCode });
+    const shaderModule = device.createShaderModule({ code: buildShaderCode(gridX, gridY) });
 
     // Check for shader compilation errors
     const info = await shaderModule.getCompilationInfo();
@@ -494,11 +539,16 @@
     );
     bitmap.close();
 
-    await createPipeline(gpuTex);
-    if (!pipeline) return; // shader error
+    currentGpuTex = gpuTex;
+    const g = computeGrid(gridMode, imageAspect);
+    gridX = g.gx; gridY = g.gy;
+
+    await createPipeline(currentGpuTex);
+    if (!pipeline) return;
 
     running = true;
     resizeCanvas();
+    document.getElementById('grid-toggle').classList.add('visible');
 
     // Hide upload screen
     uploadScreen.classList.add('hidden');
@@ -510,6 +560,22 @@
     smoothMouseY = 0.5;
 
     frame();
+  });
+
+  /* ------------------------------------------------------------------ */
+  /*  Grid mode toggle                                                    */
+  /* ------------------------------------------------------------------ */
+  document.getElementById('grid-toggle').addEventListener('click', async (e) => {
+    const btn = e.target.closest('.grid-btn');
+    if (!btn || !currentGpuTex || btn.classList.contains('active')) return;
+
+    gridMode = btn.dataset.mode;
+    document.querySelectorAll('.grid-btn').forEach(b => b.classList.toggle('active', b === btn));
+
+    const g = computeGrid(gridMode, imageAspect);
+    gridX = g.gx; gridY = g.gy;
+
+    await createPipeline(currentGpuTex);
   });
 
 })();
