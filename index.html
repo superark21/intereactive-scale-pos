@@ -227,6 +227,14 @@
   let gridY            = 12;
   let currentGpuTex    = null;
 
+  // Physics state
+  let quadOffsetBuffer = null;
+  let quadCount        = 0;
+  let physicsState     = null;  // Float32Array[quadCount*4]: ox,oy,vx,vy per quad
+  let offsetData       = null;  // Float32Array[quadCount*2]: ox,oy for GPU upload
+  let lastFrameTime    = 0;
+  let lastShakeTime    = 0;
+
   function computeGrid(mode, aspect) {
     if (mode === 'square') {
       const total = 144;
@@ -249,66 +257,82 @@
   /*  WGSL shaders                                                        */
   /* ------------------------------------------------------------------ */
   function buildShaderCode(gx, gy) { return /* wgsl */ `
-    // ---- Uniforms ----
+    // ---- Uniforms & bindings ----
     struct Uniforms {
       mouse       : vec2<f32>,
       time        : f32,
-      hoverActive : f32,   // 0=idle, 1=hovering (lerped on CPU)
+      hoverActive : f32,
     };
 
-    @group(0) @binding(0) var<uniform>       uni     : Uniforms;
-    @group(0) @binding(1) var               samp    : sampler;
-    @group(0) @binding(2) var               tex     : texture_2d<f32>;
+    @group(0) @binding(0) var<uniform>          uni         : Uniforms;
+    @group(0) @binding(1) var                   samp        : sampler;
+    @group(0) @binding(2) var                   tex         : texture_2d<f32>;
+    @group(0) @binding(3) var<storage, read>    quadOffsets : array<vec2<f32>>;
 
-    // ---- Vertex ----
+    // ---- Vertex output ----
     struct VertOut {
-      @builtin(position) pos   : vec4<f32>,
-      @location(0)       uv    : vec2<f32>,  // plane UV 0..1
+      @builtin(position) pos         : vec4<f32>,
+      @location(0)       quadUV      : vec2<f32>,   // [0..1] local position in quad
+      @location(1)       sliceCenter : vec2<f32>,   // original image-UV center of this quad
+      @location(2)       colRow      : vec2<f32>,   // col, row (for hash2 / wiggle)
+      @location(3)       planeUV     : vec2<f32>,   // undisplaced plane UV (for hover math)
     };
 
+    // ---- Vertex shader (instanced) ----
     @vertex
-    fn vs_main(@builtin(vertex_index) vi : u32) -> VertOut {
-      // Full-screen quad (two triangles)
-      var positions = array<vec2<f32>, 6>(
-        vec2(-1.0, -1.0),
-        vec2( 1.0, -1.0),
-        vec2(-1.0,  1.0),
-        vec2(-1.0,  1.0),
-        vec2( 1.0, -1.0),
-        vec2( 1.0,  1.0),
+    fn vs_main(
+      @builtin(vertex_index)   vi  : u32,
+      @builtin(instance_index) idx : u32
+    ) -> VertOut {
+      let GRID_X = ${gx}.0;
+      let GRID_Y = ${gy}.0;
+
+      // Unit quad (two triangles), local [0..1] coords
+      var localPos = array<vec2<f32>, 6>(
+        vec2(0.0, 0.0),
+        vec2(1.0, 0.0),
+        vec2(0.0, 1.0),
+        vec2(0.0, 1.0),
+        vec2(1.0, 0.0),
+        vec2(1.0, 1.0),
       );
-      let p = positions[vi];
+      let lp  = localPos[vi];
+      let col = f32(idx % ${gx}u);
+      let row = f32(idx / ${gx}u);
+
+      // Undisplaced plane UV for this vertex
+      let planeUV  = vec2((col + lp.x) / GRID_X, (row + lp.y) / GRID_Y);
+      // Convert to clip space (-1..+1), then add physics offset
+      let clipBase = vec2(planeUV.x * 2.0 - 1.0, 1.0 - planeUV.y * 2.0);
+      let phyOff   = quadOffsets[idx];
+
       var out : VertOut;
-      out.pos = vec4(p, 0.0, 1.0);
-      // uv: (0,0) = top-left, (1,1) = bottom-right
-      out.uv  = vec2(p.x * 0.5 + 0.5, 0.5 - p.y * 0.5);
+      out.pos         = vec4(clipBase + phyOff, 0.0, 1.0);
+      out.quadUV      = lp;
+      out.sliceCenter = vec2((col + 0.5) / GRID_X, (row + 0.5) / GRID_Y);
+      out.colRow      = vec2(col, row);
+      out.planeUV     = planeUV;
       return out;
     }
 
     // ---- Helpers ----
     fn hash2(p: vec2<f32>) -> vec2<f32> {
       let q = vec2<f32>(dot(p, vec2<f32>(127.1, 311.7)), dot(p, vec2<f32>(269.5, 183.3)));
-      return fract(sin(q) * 43758.5453) * 6.2832; // random phase 0..2π per quad
+      return fract(sin(q) * 43758.5453) * 6.2832;
     }
 
-    // ---- Fragment ----
+    // ---- Fragment shader ----
     @fragment
     fn fs_main(in : VertOut) -> @location(0) vec4<f32> {
       let GRID_X = ${gx}.0;
       let GRID_Y = ${gy}.0;
-      let uv = in.uv;
 
-      // Which quad are we in?
-      let col = floor(uv.x * GRID_X);
-      let row = floor(uv.y * GRID_Y);
+      // Grid cell and plane UV come from vertex varyings
+      let col = in.colRow.x;
+      let row = in.colRow.y;
+      let uv  = in.planeUV;   // undisplaced — drives imageUV exactly as before
 
-      // Normalised position inside this quad [0..1]
-      let quadUV = vec2(
-        uv.x * GRID_X - col,
-        uv.y * GRID_Y - row,
-      );
-
-      // The four corners of this quad in plane-UV space
+      // The four corners of this quad in undisplaced plane-UV space (for hover distance)
       let qx0 = col         / GRID_X;
       let qx1 = (col + 1.0) / GRID_X;
       let qy0 = row         / GRID_Y;
@@ -316,7 +340,6 @@
 
       let mouse = uni.mouse;
 
-      // Manually compare all 4 corners (avoids dynamic indexing of let-bound array)
       let c0 = vec2(qx0, qy0);
       let c1 = vec2(qx1, qy0);
       let c2 = vec2(qx0, qy1);
@@ -333,12 +356,9 @@
       if (d2 < minDist) { minDist = d2; nearestCorner = c2; }
       if (d3 < minDist) { minDist = d3; nearestCorner = c3; }
 
-      // t = 0 when mouse is ON the nearest corner, 1 when far away
-      // Wider radius (0.65) softens the hover→idle boundary for smoother transition
       let t  = clamp(minDist / 0.455, 0.0, 1.0);
       let ts = smoothstep(0.0, 1.0, t);
 
-      // Offset: sample toward mouse → image visually drifts away from cursor
       let offsetDir = select(
         normalize(mouse - nearestCorner),
         vec2(0.0),
@@ -347,28 +367,22 @@
       let offsetMag = 0.03 * ts * uni.hoverActive;
       let offset = offsetDir * offsetMag;
 
-      // Idle state: each quad samples only its own slice → reconstructs the full image
-      // Active state: zooms into the slice (4x near mouse, 1x at idle)
-      // Drastic spread: near vertex = very zoomed in, far = pixel-perfect slice
-      // Idle (hoverActive=0): zoomFactor=1.0 → each quad shows its slice, reconstructs image
-      // Hover: near cursor=0.5x zoom out, far=4.0x zoom in (drastic spread)
       let hoverZoom  = mix(0.25, 1.0, ts);
       let zoomFactor = mix(1.0, hoverZoom, uni.hoverActive);
-      let sliceCenter = vec2((col + 0.5) / GRID_X, (row + 0.5) / GRID_Y);
+      let sliceCenter = in.sliceCenter;
 
-      // Low-frequency wiggle: independent phase per quad, applies in both states
       let phase = hash2(vec2(col, row));
-      // Wiggle: zero only on the mouse's quad, full within ~2 quad widths
       let wiggleT = smoothstep(0.0, 2.0 / GRID_X, minDist);
-      // Per-quad wiggle: independent phase per quad, always active
       let wiggle = vec2<f32>(
         sin(uni.time * 0.9 + phase.x) * 0.022 * wiggleT,
         cos(uni.time * 0.7 + phase.y) * 0.022 * wiggleT
       );
 
-      let imageUV = clamp(sliceCenter + (uv - sliceCenter) / zoomFactor + offset + wiggle, vec2(0.0), vec2(1.0));
+      let imageUV = clamp(
+        sliceCenter + (uv - sliceCenter) / zoomFactor + offset + wiggle,
+        vec2(0.0), vec2(1.0)
+      );
 
-      // Sample unconditionally (textureSample requires uniform control flow)
       let color = textureSample(tex, samp, imageUV);
       return vec4(color.rgb, 1.0);
     }
@@ -413,11 +427,20 @@
       primitive: { topology: 'triangle-list' },
     });
 
-    // Uniform buffer: mouse (vec2) + padding (vec2) = 16 bytes
+    // Uniform buffer: mouse(vec2) + time + hoverActive = 16 bytes
     uniformBuffer = device.createBuffer({
       size: 16,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     });
+
+    // Storage buffer: per-quad physics offsets (vec2 each)
+    const qCount = gridX * gridY;
+    quadCount = qCount;
+    quadOffsetBuffer = device.createBuffer({
+      size:  qCount * 8,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+    });
+    initPhysics(qCount);
 
     const sampler = device.createSampler({
       magFilter: 'linear',
@@ -432,8 +455,80 @@
         { binding: 0, resource: { buffer: uniformBuffer } },
         { binding: 1, resource: sampler },
         { binding: 2, resource: texture.createView() },
+        { binding: 3, resource: { buffer: quadOffsetBuffer } },
       ],
     });
+  }
+
+  /* ------------------------------------------------------------------ */
+  /*  Physics simulation                                                  */
+  /* ------------------------------------------------------------------ */
+  const DAMPING = 0.88;
+  const IMPULSE = 0.09;
+  const PHY_MAX = 2.2;  // clip-space units; beyond this quad is off-screen
+
+  function initPhysics(count) {
+    physicsState = new Float32Array(count * 4);  // all zeros = home
+    offsetData   = new Float32Array(count * 2);
+  }
+
+  function updatePhysics(dt) {
+    if (!physicsState) return;
+    const dtCapped = Math.min(dt, 0.05);
+    for (let i = 0; i < quadCount; i++) {
+      const b = i * 4;
+      let ox = physicsState[b],     oy = physicsState[b + 1];
+      let vx = physicsState[b + 2], vy = physicsState[b + 3];
+
+      // Spring-return: mouse proximity pulls scattered quads back toward home
+      if (hoverActive > 0.01) {
+        const col = i % gridX;
+        const row = Math.floor(i / gridX);
+        const cx  = (col + 0.5) / gridX;
+        const cy  = (row + 0.5) / gridY;
+        const dx  = smoothMouseX - cx;
+        const dy  = smoothMouseY - cy;
+        const dist = Math.sqrt(dx * dx + dy * dy);
+        const proximity = Math.max(0, 1 - dist / 0.35);
+        const spring = proximity * hoverActive * 0.06;
+        vx -= ox * spring;
+        vy -= oy * spring;
+      }
+
+      // Integrate + damp
+      ox += vx * dtCapped * 60;
+      oy += vy * dtCapped * 60;
+      vx *= DAMPING;
+      vy *= DAMPING;
+
+      // Settle at edges — stop, don't bounce
+      if (ox >  PHY_MAX) { ox =  PHY_MAX; vx = 0; }
+      if (ox < -PHY_MAX) { ox = -PHY_MAX; vx = 0; }
+      if (oy >  PHY_MAX) { oy =  PHY_MAX; vy = 0; }
+      if (oy < -PHY_MAX) { oy = -PHY_MAX; vy = 0; }
+
+      physicsState[b]     = ox;  physicsState[b + 1] = oy;
+      physicsState[b + 2] = vx;  physicsState[b + 3] = vy;
+      offsetData[i * 2]     = ox;
+      offsetData[i * 2 + 1] = oy;
+    }
+    device.queue.writeBuffer(quadOffsetBuffer, 0, offsetData);
+  }
+
+  function applyShakeImpulse() {
+    if (!physicsState) return;
+    for (let i = 0; i < quadCount; i++) {
+      const col = i % gridX;
+      const row = Math.floor(i / gridX);
+      // Quad center in clip space
+      const cx  = ((col + 0.5) / gridX) * 2 - 1;
+      const cy  = 1 - ((row + 0.5) / gridY) * 2;
+      const len = Math.sqrt(cx * cx + cy * cy) || 1;
+      const mag  = IMPULSE + Math.random() * 0.04;
+      const perp = (Math.random() - 0.5) * 0.04;
+      physicsState[i * 4 + 2] += (cx / len) * mag + (-cy / len) * perp;  // vx
+      physicsState[i * 4 + 3] += (cy / len) * mag + ( cx / len) * perp;  // vy
+    }
   }
 
   /* ------------------------------------------------------------------ */
@@ -509,9 +604,21 @@
       if (!running) return;
       const gamma = e.gamma ?? 0;  // left/right tilt: -90 to 90
       const beta  = e.beta  ?? 0;  // fwd/back tilt:   -180 to 180
-      // gamma ±45° → X 0..1 | beta 30°–120° → Y 0..1 (natural hold ≈ 75°)
       rawMouseX = Math.max(0, Math.min(1, (gamma + 45) / 90));
       rawMouseY = Math.max(0, Math.min(1, (beta  - 30) / 90));
+    });
+
+    // Shake detection via accelerometer
+    window.addEventListener('devicemotion', (e) => {
+      if (!running) return;
+      const a = e.accelerationIncludingGravity;
+      if (!a) return;
+      const mag = Math.sqrt((a.x ?? 0) ** 2 + (a.y ?? 0) ** 2 + (a.z ?? 0) ** 2);
+      const now = performance.now();
+      if (mag > 20 && now - lastShakeTime > 500) {
+        lastShakeTime = now;
+        applyShakeImpulse();
+      }
     });
   }
 
@@ -537,9 +644,12 @@
   /* ------------------------------------------------------------------ */
   const MOUSE_LERP = 0.08;
 
-  function frame() {
+  function frame(now = 0) {
     if (!running) return;
     requestAnimationFrame(frame);
+
+    const dt = lastFrameTime ? (now - lastFrameTime) / 1000 : 0;
+    lastFrameTime = now;
 
     if (needsReconfigure) {
       configureContext();
@@ -554,8 +664,11 @@
     const isHovering = rawMouseX >= 0 && rawMouseX <= 1 && rawMouseY >= 0 && rawMouseY <= 1;
     hoverActive += ((isHovering ? 1.0 : 0.0) - hoverActive) * (isHovering ? 0.06 : 0.025);
 
+    // Physics update + GPU offset buffer upload
+    updatePhysics(dt);
+
     // Write uniforms
-    const data = new Float32Array([smoothMouseX, smoothMouseY, performance.now() / 1000.0, hoverActive]);
+    const data = new Float32Array([smoothMouseX, smoothMouseY, now / 1000.0, hoverActive]);
     device.queue.writeBuffer(uniformBuffer, 0, data);
 
     const commandEncoder = device.createCommandEncoder();
@@ -570,7 +683,7 @@
 
     renderPass.setPipeline(pipeline);
     renderPass.setBindGroup(0, bindGroup);
-    renderPass.draw(6, 1, 0, 0);  // 2 triangles = full-screen quad
+    renderPass.draw(6, quadCount, 0, 0);  // 6 verts × 144 instances
     renderPass.end();
 
     device.queue.submit([commandEncoder.finish()]);
