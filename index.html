@@ -120,6 +120,26 @@
     .grid-btn + .grid-btn { border-left: 1px solid #333; }
     .grid-btn.active { background: #1e1e1e; color: #ddd; }
     .grid-btn:hover:not(.active) { color: #999; }
+
+    #gyro-btn {
+      position: fixed;
+      bottom: 68px;
+      left: 50%;
+      transform: translateX(-50%);
+      display: none;
+      padding: 8px 20px;
+      border: 1px solid #333;
+      border-radius: 4px;
+      background: #111;
+      color: #888;
+      font-size: 0.75rem;
+      letter-spacing: 0.05em;
+      cursor: pointer;
+      z-index: 5;
+      transition: color 0.2s, border-color 0.2s;
+    }
+    #gyro-btn.visible  { display: block; }
+    #gyro-btn.enabled  { color: #7af; border-color: #7af; }
   </style>
 </head>
 <body>
@@ -148,6 +168,7 @@
     <button class="grid-btn active" data-mode="proportional">Proportional</button>
     <button class="grid-btn"        data-mode="square">Square</button>
   </div>
+  <button id="gyro-btn">Enable Gyroscope</button>
 
 <script>
 (async () => {
@@ -443,7 +464,7 @@
   window.addEventListener('resize', resizeCanvas);
 
   /* ------------------------------------------------------------------ */
-  /*  Mouse tracking                                                      */
+  /*  Mouse tracking (desktop)                                           */
   /* ------------------------------------------------------------------ */
   canvas.addEventListener('mousemove', (e) => {
     if (!running) return;
@@ -451,9 +472,18 @@
     rawMouseX = (e.clientX - rect.left) / rect.width;
     rawMouseY = (e.clientY - rect.top)  / rect.height;
   });
+  canvas.addEventListener('mouseleave', () => {
+    rawMouseX = -2; rawMouseY = -2;
+  });
+
+  /* ------------------------------------------------------------------ */
+  /*  Touch fallback (mobile without gyroscope)                          */
+  /* ------------------------------------------------------------------ */
+  let gyroActive = false;
+  const isMobile = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
 
   function handleTouch(e) {
-    if (!running) return;
+    if (!running || gyroActive) return;
     e.preventDefault();
     const touch = e.touches[0];
     if (!touch) return;
@@ -463,14 +493,44 @@
   }
   canvas.addEventListener('touchstart', handleTouch, { passive: false });
   canvas.addEventListener('touchmove',  handleTouch, { passive: false });
-
-  // Move effective mouse off-plane so all quads ease back to idle
-  canvas.addEventListener('mouseleave', () => {
-    rawMouseX = -2; rawMouseY = -2;
-  });
   canvas.addEventListener('touchend', () => {
-    rawMouseX = -2; rawMouseY = -2;
+    if (!gyroActive) { rawMouseX = -2; rawMouseY = -2; }
   }, { passive: true });
+
+  /* ------------------------------------------------------------------ */
+  /*  Gyroscope (mobile)                                                 */
+  /* ------------------------------------------------------------------ */
+  function startGyroscope() {
+    gyroActive = true;
+    document.getElementById('gyro-btn').classList.add('enabled');
+    document.getElementById('gyro-btn').textContent = 'Gyroscope On';
+
+    window.addEventListener('deviceorientation', (e) => {
+      if (!running) return;
+      const gamma = e.gamma ?? 0;  // left/right tilt: -90 to 90
+      const beta  = e.beta  ?? 0;  // fwd/back tilt:   -180 to 180
+      // gamma ±45° → X 0..1 | beta 30°–120° → Y 0..1 (natural hold ≈ 75°)
+      rawMouseX = Math.max(0, Math.min(1, (gamma + 45) / 90));
+      rawMouseY = Math.max(0, Math.min(1, (beta  - 30) / 90));
+    });
+  }
+
+  const gyroBtn = document.getElementById('gyro-btn');
+
+  if (isMobile && window.DeviceOrientationEvent) {
+    // Show button after upload (handled below); wire up click
+    gyroBtn.addEventListener('click', () => {
+      if (typeof DeviceOrientationEvent.requestPermission === 'function') {
+        // iOS 13+
+        DeviceOrientationEvent.requestPermission()
+          .then(state => { if (state === 'granted') startGyroscope(); })
+          .catch(console.error);
+      } else {
+        // Android / older iOS
+        startGyroscope();
+      }
+    });
+  }
 
   /* ------------------------------------------------------------------ */
   /*  Render loop                                                         */
@@ -552,6 +612,9 @@
     running = true;
     resizeCanvas();
     document.getElementById('grid-toggle').classList.add('visible');
+    if (isMobile && window.DeviceOrientationEvent) {
+      gyroBtn.classList.add('visible');
+    }
 
     // Hide upload screen
     uploadScreen.classList.add('hidden');
