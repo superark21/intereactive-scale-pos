@@ -338,8 +338,8 @@
       // Low-frequency wiggle: independent phase per quad, applies in both states
       let phase = hash2(vec2(col, row));
       let wiggle = vec2<f32>(
-        sin(uni.time * 0.9 + phase.x) * 0.010,
-        cos(uni.time * 0.7 + phase.y) * 0.010
+        sin(uni.time * 0.9 + phase.x) * 0.010 * ts,
+        cos(uni.time * 0.7 + phase.y) * 0.010 * ts
       );
 
       let imageUV = clamp(sliceCenter + (uv - sliceCenter) / zoomFactor + offset + wiggle, vec2(0.0), vec2(1.0));
