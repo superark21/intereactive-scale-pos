@@ -168,6 +168,7 @@
   let imageAspect    = 1;       // width / height of uploaded image
   let running          = false;
   let needsReconfigure = false;
+  let hoverActive      = 0.0;
 
   // raw mouse in canvas-pixel space
   let rawMouseX = 0.5;
@@ -185,9 +186,9 @@
   const shaderCode = /* wgsl */ `
     // ---- Uniforms ----
     struct Uniforms {
-      mouse : vec2<f32>,
-      time  : f32,
-      pad   : f32,
+      mouse       : vec2<f32>,
+      time        : f32,
+      hoverActive : f32,   // 0=idle, 1=hovering (lerped on CPU)
     };
 
     @group(0) @binding(0) var<uniform>       uni     : Uniforms;
@@ -283,14 +284,17 @@
       // Idle state: each quad samples only its own slice → reconstructs the full image
       // Active state: zooms into the slice (4x near mouse, 1x at idle)
       // Drastic spread: near vertex = very zoomed in, far = pixel-perfect slice
-      let zoomFactor = mix(0.5, 4.0, ts);
+      // Idle (hoverActive=0): zoomFactor=1.0 → each quad shows its slice, reconstructs image
+      // Hover: near cursor=0.5x zoom out, far=4.0x zoom in (drastic spread)
+      let hoverZoom  = mix(0.5, 4.0, ts);
+      let zoomFactor = mix(1.0, hoverZoom, uni.hoverActive);
       let sliceCenter = vec2((col + 0.5) / GRID_F, (row + 0.5) / GRID_F);
 
       // Low-frequency wiggle: independent phase per quad, applies in both states
       let phase = hash2(vec2(col, row));
       let wiggle = vec2<f32>(
-        sin(uni.time * 1.1 + phase.x) * 0.013,
-        cos(uni.time * 0.8 + phase.y) * 0.013
+        sin(uni.time * 0.4 + phase.x) * 0.004,
+        cos(uni.time * 0.3 + phase.y) * 0.004
       );
 
       let imageUV = clamp(sliceCenter + (uv - sliceCenter) / zoomFactor + offset + wiggle, vec2(0.0), vec2(1.0));
@@ -438,8 +442,12 @@
     smoothMouseX += (rawMouseX - smoothMouseX) * MOUSE_LERP;
     smoothMouseY += (rawMouseY - smoothMouseY) * MOUSE_LERP;
 
+    // Lerp hoverActive: fast in (0.06), slow out (0.025) for lingering return to idle
+    const isHovering = rawMouseX >= 0 && rawMouseX <= 1 && rawMouseY >= 0 && rawMouseY <= 1;
+    hoverActive += ((isHovering ? 1.0 : 0.0) - hoverActive) * (isHovering ? 0.06 : 0.025);
+
     // Write uniforms
-    const data = new Float32Array([smoothMouseX, smoothMouseY, performance.now() / 1000.0, 0]);
+    const data = new Float32Array([smoothMouseX, smoothMouseY, performance.now() / 1000.0, hoverActive]);
     device.queue.writeBuffer(uniformBuffer, 0, data);
 
     const commandEncoder = device.createCommandEncoder();
