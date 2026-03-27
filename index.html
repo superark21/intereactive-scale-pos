@@ -128,6 +128,7 @@
   let gridMode      = 'proportional';
   let quads         = [];       // div elements
   let phases        = [];       // [{x, y}] per-quad wiggle phases
+  let smoothZooms   = null;     // Float32Array — per-quad lerped zoom
   let physicsState  = null;     // Float32Array[count*4]: ox,oy,vx,vy (pixels)
   let containerW    = 0;
   let containerH    = 0;
@@ -200,6 +201,7 @@
       });
     }
 
+    smoothZooms = new Float32Array(count).fill(1);
     initPhysics(count);
   }
 
@@ -354,11 +356,13 @@
         dist(smoothMouseX, smoothMouseY, qx1, qy1),
       );
 
-      // Zoom: near cursor = 0.25x, far = 1.0x
+      // Zoom: near cursor = 0.25x, far = 1.0x — lerped per quad to prevent stutter
       const t        = Math.min(1, minDist / 0.455);
       const ts       = smoothstep(0, 1, t);
-      const hZoom    = 0.25 + 0.75 * ts;          // mix(0.25, 1.0, ts)
-      const zoom     = 1 + (hZoom - 1) * hoverActive; // mix(1.0, hZoom, hoverActive)
+      const hZoom    = 0.25 + 0.75 * ts;
+      const target   = 1 + (hZoom - 1) * hoverActive;
+      smoothZooms[i] += (target - smoothZooms[i]) * 0.12;
+      const zoom     = smoothZooms[i];
 
       // Wiggle: per-quad independent, zero right at cursor
       const wiggleT  = smoothstep(0, 2 / gridX, minDist);
