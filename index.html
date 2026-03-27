@@ -222,7 +222,6 @@
   let running          = false;
   let needsReconfigure = false;
   let hoverActive      = 0.0;
-  let dispersion       = 0.0;
   let gridMode         = 'proportional';
   let gridX            = 12;
   let gridY            = 12;
@@ -254,11 +253,7 @@
     struct Uniforms {
       mouse       : vec2<f32>,
       time        : f32,
-      hoverActive : f32,
-      dispersion  : f32,  // 0=gathered, 1=fully scattered
-      _pad1       : f32,
-      _pad2       : f32,
-      _pad3       : f32,
+      hoverActive : f32,   // 0=idle, 1=hovering (lerped on CPU)
     };
 
     @group(0) @binding(0) var<uniform>       uni     : Uniforms;
@@ -371,11 +366,7 @@
         cos(uni.time * 0.7 + phase.y) * 0.022 * wiggleT
       );
 
-      // Drift: quads scatter outward from centre when dispersion > 0
-      // Mouse proximity pulls them back (ts=0 near cursor, 1 far away)
-      let driftVec = (sliceCenter - vec2(0.5, 0.5)) * ts * uni.dispersion * 0.5;
-
-      let imageUV = clamp(sliceCenter + (uv - sliceCenter) / zoomFactor + offset + wiggle + driftVec, vec2(0.0), vec2(1.0));
+      let imageUV = clamp(sliceCenter + (uv - sliceCenter) / zoomFactor + offset + wiggle, vec2(0.0), vec2(1.0));
 
       // Sample unconditionally (textureSample requires uniform control flow)
       let color = textureSample(tex, samp, imageUV);
@@ -422,9 +413,9 @@
       primitive: { topology: 'triangle-list' },
     });
 
-    // Uniform buffer: mouse(vec2) + time + hoverActive + dispersion + 3 pad = 32 bytes
+    // Uniform buffer: mouse (vec2) + padding (vec2) = 16 bytes
     uniformBuffer = device.createBuffer({
-      size: 32,
+      size: 16,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     });
 
@@ -563,11 +554,8 @@
     const isHovering = rawMouseX >= 0 && rawMouseX <= 1 && rawMouseY >= 0 && rawMouseY <= 1;
     hoverActive += ((isHovering ? 1.0 : 0.0) - hoverActive) * (isHovering ? 0.06 : 0.025);
 
-    // Dispersion: lags behind hoverActive, so scatter trails hover state
-    dispersion += (hoverActive - dispersion) * 0.04;
-
     // Write uniforms
-    const data = new Float32Array([smoothMouseX, smoothMouseY, performance.now() / 1000.0, hoverActive, dispersion, 0, 0, 0]);
+    const data = new Float32Array([smoothMouseX, smoothMouseY, performance.now() / 1000.0, hoverActive]);
     device.queue.writeBuffer(uniformBuffer, 0, data);
 
     const commandEncoder = device.createCommandEncoder();
