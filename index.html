@@ -272,13 +272,13 @@
       let t  = clamp(minDist / 0.65, 0.0, 1.0);
       let ts = smoothstep(0.0, 1.0, t);
 
-      // Offset: direction from mouse toward nearest corner (= away from mouse)
+      // Offset: sample toward mouse → image visually drifts away from cursor
       let offsetDir = select(
-        normalize(nearestCorner - mouse),
+        normalize(mouse - nearestCorner),
         vec2(0.0),
         minDist < 0.001
       );
-      let offsetMag = 0.06 * ts;   // 0 when near, 6% of image when far
+      let offsetMag = 0.03 * ts;   // 0 when near, 3% of image when far
       let offset = offsetDir * offsetMag;
 
       // Idle state: each quad samples only its own slice → reconstructs the full image
@@ -293,8 +293,8 @@
       // Low-frequency wiggle: independent phase per quad, applies in both states
       let phase = hash2(vec2(col, row));
       let wiggle = vec2<f32>(
-        sin(uni.time * 0.4 + phase.x) * 0.004,
-        cos(uni.time * 0.3 + phase.y) * 0.004
+        sin(uni.time * 0.9 + phase.x) * 0.010,
+        cos(uni.time * 0.7 + phase.y) * 0.010
       );
 
       let imageUV = clamp(sliceCenter + (uv - sliceCenter) / zoomFactor + offset + wiggle, vec2(0.0), vec2(1.0));
