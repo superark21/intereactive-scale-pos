@@ -286,7 +286,7 @@
       // Drastic spread: near vertex = very zoomed in, far = pixel-perfect slice
       // Idle (hoverActive=0): zoomFactor=1.0 → each quad shows its slice, reconstructs image
       // Hover: near cursor=0.5x zoom out, far=4.0x zoom in (drastic spread)
-      let hoverZoom  = mix(0.5, 4.0, ts);
+      let hoverZoom  = mix(0.5, 2.8, ts);
       let zoomFactor = mix(1.0, hoverZoom, uni.hoverActive);
       let sliceCenter = vec2((col + 0.5) / GRID_F, (row + 0.5) / GRID_F);
 
